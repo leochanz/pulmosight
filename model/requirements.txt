@@ -1,0 +1,10 @@
+flask
+flask-cors
+numpy
+opencv-python
+pydicom
+torch
+transformers
+segment-anything-py
+gunicorn
+gevent
