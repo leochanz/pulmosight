@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+requests
+numpy
+opencv-python
+pydicom
+torch
+transformers
+segment-anything
+python-dotenv

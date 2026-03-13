@@ -1,0 +1,58 @@
+import { Patient } from '@/types/patient';
+
+export const mockPatients: Patient[] = [
+  {
+    id: 'PT-001',
+    name: 'John Anderson',
+    age: 58,
+    gender: 'Male',
+    dateOfBirth: '1966-03-15',
+    lastVisit: '2024-12-20',
+    status: 'Pending',
+  },
+  {
+    id: 'PT-002',
+    name: 'Sarah Mitchell',
+    age: 45,
+    gender: 'Female',
+    dateOfBirth: '1979-07-22',
+    lastVisit: '2024-12-18',
+    status: 'Active',
+  },
+  {
+    id: 'PT-003',
+    name: 'Robert Chen',
+    age: 67,
+    gender: 'Male',
+    dateOfBirth: '1957-11-08',
+    lastVisit: '2024-12-15',
+    status: 'Completed',
+  },
+  {
+    id: 'PT-004',
+    name: 'Maria Garcia',
+    age: 52,
+    gender: 'Female',
+    dateOfBirth: '1972-04-30',
+    lastVisit: '2024-12-22',
+    status: 'Pending',
+  },
+  {
+    id: 'PT-005',
+    name: 'James Wilson',
+    age: 71,
+    gender: 'Male',
+    dateOfBirth: '1953-09-14',
+    lastVisit: '2024-12-10',
+    status: 'Active',
+  },
+  {
+    id: 'PT-006',
+    name: 'Emily Thompson',
+    age: 39,
+    gender: 'Female',
+    dateOfBirth: '1985-12-03',
+    lastVisit: '2024-12-21',
+    status: 'Pending',
+  },
+];
