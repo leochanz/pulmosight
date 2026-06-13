@@ -57,7 +57,7 @@ from torch.utils.data import Dataset, DataLoader
 # DEFAULT_SAVE_DIR = r"C:\Users\hkpuadmin\Desktop\CTM\fine-tune\SEGMENTATION"
 
 DEFAULT_ROOT_DIR = r"/Users/leochan/Downloads/ctm/backend"
-DEFAULT_MEDSAM_CKPT = r"/Users/leochan/Downloads/ctm/backend/medsam_seg_fold2_best.pt"  # <-- MedSAM checkpoint path
+DEFAULT_MEDSAM_CKPT = r"/Users/leochan/Downloads/ctm/backend/medsam_seg_fold2_last.pt"  # <-- MedSAM checkpoint path
 DEFAULT_SAVE_DIR = r"/Users/leochan/Downloads/ctm/backend/segmentation"
 
 # SAM / MedSAM pixel normalization (from SAM code)

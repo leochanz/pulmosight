@@ -27,3 +27,5 @@ local_uploads/
 __pycache__/
 .env
 .env.production
+
+.venv/

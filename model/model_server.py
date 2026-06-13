@@ -21,7 +21,7 @@ from medsam_segmentation_TRIAL2_auto_thr import (
 
 app = Flask(__name__)
 
-MODEL_PT = os.getenv("MODEL_PT", "medsam_seg_fold2_best.pt")
+MODEL_PT = os.getenv("MODEL_PT", "medsam_seg_fold2_last.pt")
 THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))
 
 ENABLE_SEGMENTATION_MODEL = os.getenv("ENABLE_SEGMENTATION_MODEL", "1") == "1"
