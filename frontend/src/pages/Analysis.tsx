@@ -335,11 +335,6 @@ const Analysis = () => {
           <p className="text-sm mt-1 text-muted-foreground">
             {classificationText}
           </p>
-          {classification && (
-            <p className="text-sm text-foreground mt-1">
-              Confidence: {Math.round(classification.confidence * 100)}%
-            </p>
-          )}
           {errorMessage && (
             <div className="mt-3">
               <p className="text-sm text-destructive">{errorMessage}</p>
@@ -399,33 +394,6 @@ const Analysis = () => {
                 Segmentation was skipped because classification was negative.
               </div>
             )}
-
-            {/* Legend */}
-            <div className="bg-card border border-border rounded-lg p-4">
-              <h3 className="text-sm font-medium text-foreground mb-3">
-                Coordinate Legend
-              </h3>
-              <div className="space-y-2">
-                {(result?.coordinates ?? []).map((coord, index) => (
-                  <div
-                    key={index}
-                    className="flex items-center justify-between text-sm"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 bg-destructive text-destructive-foreground text-xs rounded">
-                        {coord.label}
-                      </span>
-                      <span className="text-muted-foreground">
-                        Nodule {index + 1}
-                      </span>
-                    </div>
-                    <span className="text-foreground font-mono">
-                      ({coord.x}%, {coord.y}%)
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
           </div>
 
           {/* Analysis Results */}
@@ -434,24 +402,50 @@ const Analysis = () => {
               <h2 className="text-lg font-semibold text-foreground mb-4">
                 Analysis Metrics
               </h2>
+              {classification && (
+                <div className="mb-4 rounded-lg border border-border bg-card p-4">
+                  <h3 className="text-sm font-semibold text-foreground mb-2">
+                    Classification Result
+                  </h3>
+                  <p className="text-2xl font-bold text-foreground leading-tight">
+                    {classification.has_cancer
+                      ? "High risk cancer detected"
+                      : "Low risk detected"}
+                  </p>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {classification.has_cancer
+                      ? "Suggest review in 1–2 weeks."
+                      : "Continue routine follow-up and recheck if needed."}
+                  </p>
+                </div>
+              )}
               <MalignancyChart result={result ?? emptyAnalysisResult} />
-            </div>
-
-            {classification && (
               <div className="bg-card border border-border rounded-lg p-4">
-                <h3 className="text-sm font-medium text-foreground mb-2">
-                  Classification Result
+                <h3 className="text-sm font-medium text-foreground mb-3">
+                  Coordinate Legend
                 </h3>
-                <p className="text-sm text-muted-foreground">
-                  {classification.has_cancer
-                    ? "Cancer detected by classification model."
-                    : "No cancer detected by classification model."}
-                </p>
-                <p className="text-sm text-foreground mt-1">
-                  Confidence: {Math.round(classification.confidence * 100)}%
-                </p>
+                <div className="space-y-2">
+                  {(result?.coordinates ?? []).map((coord, index) => (
+                    <div
+                      key={index}
+                      className="flex items-center justify-between text-sm"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 bg-destructive text-destructive-foreground text-xs rounded">
+                          {coord.label}
+                        </span>
+                        <span className="text-muted-foreground">
+                          Nodule {index + 1}
+                        </span>
+                      </div>
+                      <span className="text-foreground font-mono">
+                        ({coord.x}%, {coord.y}%)
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            )}
+            </div>
           </div>
         </div>
       </main>
