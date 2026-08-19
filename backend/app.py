@@ -14,10 +14,12 @@ from config import (
     MODEL_API_RETRIES,
     MODEL_API_RETRY_BACKOFF_SEC,
 )
+from run_local_medsam_infer import app as segmentation_app
 
 load_dotenv()
 
 app = FastAPI()
+app.include_router(segmentation_app.router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://154.85.62.123", "http://pulmosight.top", "https://pulmosight.top", "http://localhost:8080", "http://127.0.0.1:8080", "*"],

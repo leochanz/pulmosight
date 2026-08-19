@@ -13,6 +13,14 @@ import torch
 import requests
 import os
 
+try:
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+except Exception:  # pragma: no cover - used only when FastAPI is unavailable
+    FastAPI = None
+    HTTPException = None
+    BaseModel = None
+
 from medsam_segmentation_TRIAL2_auto_thr import (
     window_and_norm,
     SAM_PIXEL_MEAN,
@@ -192,10 +200,198 @@ def _infer_mask_from_api(
 
 
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
+ROOT = Path(__file__).resolve().parent
+UPLOAD_DIR = ROOT / "local_uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
+SEGMENTATION_JOB_STORE: dict[str, dict[str, Any]] = {}
+
 
 def _public_asset_url(job_id: str, filename: str) -> str:
     rel = f"/api/local_uploads/{job_id}/{filename}"
     return f"{PUBLIC_BASE_URL}{rel}" if PUBLIC_BASE_URL else rel
+
+
+def _run_segmentation_job(
+    job_id: str,
+    input_path: Path | None = None,
+    segmentation_api: str | None = None,
+    segmentation_timeout: float = 60.0,
+    retries: int = 2,
+    retry_backoff: float = 0.8,
+) -> dict[str, Any]:
+    """Manual segmentation gate: this function is only called from the explicit API route."""
+    if input_path is None:
+        input_path = next(iter(sorted((UPLOAD_DIR / job_id).glob("*.dcm"))), None)
+    if input_path is None:
+        raise FileNotFoundError(f"No DICOM file found for job_id={job_id}")
+
+    job_dir = input_path.parent
+    result_path = job_dir / "result.json"
+
+    # Idempotent check: if segmentation already completed, return the stored result.
+    if result_path.exists():
+        try:
+            existing = json.loads(result_path.read_text(encoding="utf-8"))
+            if existing.get("segmentation") not in (None, {}) and existing.get("segmentation", {}).get("shape"):
+                return {"success": True, "jobId": job_id, "status": "completed", "result": existing}
+        except Exception:
+            pass
+
+    try:
+        _write_status_ex(job_dir, "running", stage="segmentation")
+        payload = {}
+        if result_path.exists():
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+
+        classification_result = payload.get("classification") or {}
+        if not bool(classification_result.get("has_cancer", False)):
+            raise RuntimeError("Segmentation is blocked for a negative classification result.")
+
+        img01 = _read_dicom_to_img01(input_path)
+        seg_t0 = time.perf_counter()
+        mask_u8 = _infer_mask_from_api(
+            segmentation_api=segmentation_api or os.getenv("SEGMENTATION_API_URL", "http://127.0.0.1:5001"),
+            dicom_path=input_path,
+            timeout_sec=segmentation_timeout,
+            retries=max(0, retries),
+            retry_backoff=max(0.0, retry_backoff),
+        )
+        seg_time = time.perf_counter() - seg_t0
+
+        h, w = mask_u8.shape
+        img_resized = cv2.resize(img01, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        original_name, mask_name, overlay_name = _save_outputs(job_dir, img_resized, mask_u8)
+
+        comps = _connected_components(mask_u8)
+        coords = []
+        for idx, (_, cx, cy) in enumerate(comps[:5], start=1):
+            coords.append(
+                {
+                    "x": round((cx / max(1.0, float(w))) * 100.0, 2),
+                    "y": round((cy / max(1.0, float(h))) * 100.0, 2),
+                    "label": f"N{idx}",
+                }
+            )
+
+        nodule_count = len(comps)
+        malignancy_score = min(99, 10 + nodule_count * 15)
+        confidence = 90 if nodule_count > 0 else 82
+        findings = [
+            f"Detected {nodule_count} candidate nodule region(s).",
+            "Segmentation generated from remote model API.",
+            "Clinical review is recommended to confirm findings.",
+        ]
+
+        result_payload = {
+            "requestId": job_id,
+            "classification": {
+                "has_cancer": bool(classification_result.get("has_cancer", False)),
+                "confidence": float(classification_result.get("confidence", 0.0)),
+                "processing_time": float(classification_result.get("processing_time", 0.0)),
+                "label": classification_result.get("label"),
+                "threshold": classification_result.get("threshold"),
+            },
+            "segmentation": {
+                "processing_time": round(seg_time, 4),
+                "shape": [int(h), int(w)],
+                "maskUrl": _public_asset_url(job_id, mask_name),
+                "overlayUrl": _public_asset_url(job_id, overlay_name),
+            },
+            "malignancyScore": malignancy_score,
+            "confidence": confidence,
+            "noduleCount": nodule_count,
+            "coordinates": coords,
+            "findings": findings,
+            "originalScan": _public_asset_url(job_id, original_name),
+            "segmentationImages": [
+                _public_asset_url(job_id, overlay_name),
+                _public_asset_url(job_id, mask_name),
+            ],
+        }
+        result_path.write_text(json.dumps(result_payload, ensure_ascii=False), encoding="utf-8")
+        _write_status_ex(job_dir, "completed", stage="completed")
+        SEGMENTATION_JOB_STORE[job_id] = {"status": "completed", "jobId": job_id, "result": result_payload}
+        return {"success": True, "jobId": job_id, "status": "completed", "result": result_payload}
+    except Exception as e:
+        err_msg = f"{type(e).__name__}: {e}"
+        print("[run_local_medsam_infer] segmentation error:")
+        print(traceback.format_exc())
+        _write_status_ex(job_dir, "failed", err_msg, stage="failed")
+        SEGMENTATION_JOB_STORE[job_id] = {"status": "failed", "jobId": job_id, "error": err_msg}
+        return {"success": False, "jobId": job_id, "status": "failed", "error": err_msg}
+
+
+if FastAPI is not None:
+    app = FastAPI()
+
+    class RunSegmentationRequest(BaseModel):
+        jobId: str | None = None
+        requestId: str | None = None
+        analysisId: str | None = None
+
+    @app.post("/api/segmentation/run")
+    async def run_segmentation_route(payload: RunSegmentationRequest):
+        """Manual trigger endpoint. Segmentation starts only after user click."""
+        job_id = payload.jobId or payload.requestId or payload.analysisId
+        if not job_id:
+            raise HTTPException(status_code=400, detail="jobId/requestId/analysisId is required")
+
+        job_dir = UPLOAD_DIR / job_id
+        if not job_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+        status_path = job_dir / "status.json"
+        if status_path.exists():
+            try:
+                current_status = json.loads(status_path.read_text(encoding="utf-8"))
+                if current_status.get("status") in {"running", "pending"}:
+                    return {
+                        "success": True,
+                        "jobId": job_id,
+                        "status": current_status.get("status", "running"),
+                        "message": "Segmentation is already in progress for this job.",
+                    }
+            except Exception:
+                pass
+
+        result_path = job_dir / "result.json"
+        if result_path.exists():
+            try:
+                result_payload = json.loads(result_path.read_text(encoding="utf-8"))
+                if result_payload.get("segmentation") not in (None, {}) and result_payload.get("segmentation", {}).get("shape"):
+                    return {
+                        "success": True,
+                        "jobId": job_id,
+                        "status": "completed",
+                        "result": result_payload,
+                        "message": "Segmentation already completed for this job.",
+                    }
+            except Exception:
+                pass
+
+        result = _run_segmentation_job(
+            job_id=job_id,
+            input_path=next(iter(sorted(job_dir.glob("*.dcm"))), None),
+            segmentation_api=os.getenv("SEGMENTATION_API_URL", "http://127.0.0.1:5001"),
+            segmentation_timeout=float(os.getenv("SEGMENTATION_TIMEOUT_SEC", "60")),
+            retries=int(os.getenv("MODEL_API_RETRIES", "2")),
+            retry_backoff=float(os.getenv("MODEL_API_RETRY_BACKOFF_SEC", "0.8")),
+        )
+
+        if result.get("success"):
+            return {
+                "success": True,
+                "jobId": job_id,
+                "status": result["status"],
+                "result": result.get("result"),
+                "resultUrl": f"/api/analysis/result/{job_id}",
+            }
+
+        raise HTTPException(status_code=500, detail=result.get("error", "Segmentation failed"))
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -212,7 +408,6 @@ def main():
     input_path = Path(args.input)
     job_dir = input_path.parent
     request_id = args.job_id
-    warnings: list[str] = []
     _write_status_ex(job_dir, "running", stage="classification")
 
     try:
@@ -272,102 +467,22 @@ def main():
             _write_status_ex(job_dir, "completed", stage="completed")
             return
 
-        _write_status_ex(job_dir, "running", stage="segmentation")
-
-        img01 = _read_dicom_to_img01(input_path)
-        seg_t0 = time.perf_counter()
-        mask_u8 = _infer_mask_from_api(
-            segmentation_api=args.segmentation_api,
-            dicom_path=input_path,
-            timeout_sec=args.segmentation_timeout,
-            retries=max(0, args.retries),
-            retry_backoff=max(0.0, args.retry_backoff),
+        # IMPORTANT: manual gate. The segmentation step is intentionally not triggered here.
+        # The explicit user action must call /api/segmentation/run.
+        _write_status_ex(
+            job_dir,
+            "completed",
+            stage="classification",
+            warnings=["Classification complete; segmentation awaiting explicit user trigger."],
         )
-        seg_time = time.perf_counter() - seg_t0
+        return
 
-        h, w = mask_u8.shape
-        img_resized = cv2.resize(img01, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
-
-        original_name, mask_name, overlay_name = _save_outputs(job_dir, img_resized, mask_u8)
-
-        comps = _connected_components(mask_u8)
-        coords = []
-        h, w = mask_u8.shape
-        for idx, (_, cx, cy) in enumerate(comps[:5], start=1):
-            coords.append(
-                {
-                    "x": round((cx / max(1.0, float(w))) * 100.0, 2),
-                    "y": round((cy / max(1.0, float(h))) * 100.0, 2),
-                    "label": f"N{idx}",
-                }
-            )
-
-        nodule_count = len(comps)
-        malignancy_score = min(99, 10 + nodule_count * 15)
-        confidence = 90 if nodule_count > 0 else 82
-        findings = [
-            f"Detected {nodule_count} candidate nodule region(s).",
-            "Segmentation generated from remote model API.",
-            "Clinical review is recommended to confirm findings.",
-        ]
-        
-        result_payload = {
-            "requestId": request_id,
-            "classification": {
-                "has_cancer": True,
-                "confidence": cls_conf,
-                "processing_time": float(cls_payload.get("processing_time", classification_time)),
-                "label": cls_payload.get("label"),
-                "threshold": cls_payload.get("threshold"),
-            },
-            "segmentation": {
-                "processing_time": round(seg_time, 4),
-                "shape": [int(h), int(w)],
-                "maskUrl": _public_asset_url(args.job_id, mask_name),
-                "overlayUrl": _public_asset_url(args.job_id, overlay_name),
-            },
-            "malignancyScore": malignancy_score,
-            "confidence": confidence,
-            "noduleCount": nodule_count,
-            "coordinates": coords,
-            "findings": findings,
-            "originalScan": _public_asset_url(args.job_id, original_name),
-            "segmentationImages": [
-                _public_asset_url(args.job_id, overlay_name),
-                _public_asset_url(args.job_id, mask_name),
-            ],
-        }
-        (job_dir / "result.json").write_text(
-            json.dumps(result_payload, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        _write_status_ex(job_dir, "completed", stage="completed", warnings=warnings)
     except Exception as e:
         err_msg = f"{type(e).__name__}: {e}"
         print("[run_local_medsam_infer] error:")
         print(traceback.format_exc())
-        res_path = job_dir / "result.json"
-        if res_path.exists():
-            try:
-                partial = json.loads(res_path.read_text(encoding="utf-8"))
-            except Exception:
-                partial = {}
-
-            if partial.get("classification", {}).get("has_cancer") is True:
-                partial["segmentation"] = {
-                    "error": err_msg,
-                    "failed": True,
-                }
-                partial.setdefault("findings", [])
-                partial["findings"].append("Segmentation failed after positive classification.")
-                res_path.write_text(
-                    json.dumps(partial, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                _write_status_ex(job_dir, "completed", stage="completed", warnings=[err_msg])
-                return
-
         _write_status_ex(job_dir, "failed", err_msg, stage="failed")
-    
+
+
 if __name__ == "__main__":
     main()

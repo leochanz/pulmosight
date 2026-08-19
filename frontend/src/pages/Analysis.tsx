@@ -4,7 +4,7 @@ import { CTScanViewer } from "@/components/CTScanViewer";
 import { MalignancyChart } from "@/components/MalignancyChart";
 import { Button } from "@/components/ui/button";
 import { AnalysisResult, Patient } from "@/types/patient";
-import { ArrowLeft, Download, FileText, Layers } from "lucide-react";
+import { ArrowLeft, Download, FileText, Layers, Loader2 } from "lucide-react";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { toast } from "@/hooks/use-toast";
 
@@ -69,6 +69,8 @@ const Analysis = () => {
   const patient = location.state?.patient as Patient | undefined;
   const routeJobId = location.state?.jobId as string | undefined;
   const [showSegmentation, setShowSegmentation] = useState(false);
+  const [showResultsModal, setShowResultsModal] = useState(false);
+  const [isStartingSegmentation, setIsStartingSegmentation] = useState(false);
 
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [segmentImages, setSegmentImages] = useState<string[]>([]);
@@ -85,8 +87,96 @@ const Analysis = () => {
   const [pollTick, setPollTick] = useState(0);
   const [pollingCancelled, setPollingCancelled] = useState(false);
   const activeController = useRef<AbortController | null>(null);
+  const classificationModalShownRef = useRef(false);
 
   const hasSegmentation = segmentImages.length > 0;
+
+  // IMPORTANT: The classification result opens the modal only once per job.
+  // Polling can re-read the same result payload, so we must not reopen the modal
+  // just because the fetch completes again or the final result arrives.
+  useEffect(() => {
+    if (!classification || classificationModalShownRef.current) return;
+
+    classificationModalShownRef.current = true;
+    setShowResultsModal(true);
+  }, [classification]);
+
+  const handleReturnToDashboard = () => {
+    classificationModalShownRef.current = true;
+    setShowResultsModal(false);
+    navigate("/dashboard");
+  };
+
+  const handleSeeResult = () => {
+    classificationModalShownRef.current = true;
+    setShowResultsModal(false);
+  };
+
+  const handleProceedToSegmentation = async () => {
+    if (!jobId) {
+      toast({
+        title: "Segmentation unavailable",
+        description: "This analysis is missing a valid job identifier.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsStartingSegmentation(true);
+
+    try {
+      const response = await fetch(
+        `${import.meta.env.VITE_API_BASE_URL}/api/segmentation/run`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            jobId,
+            requestId: jobId,
+            analysisId: jobId,
+          }),
+        },
+      );
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok || data.success === false) {
+        throw new Error(data.error || "Segmentation could not be started.");
+      }
+
+      // Close the modal and move the user into the segmentation stage only after
+      // the explicit user action. This keeps the backend trigger gated.
+      classificationModalShownRef.current = true;
+      setShowResultsModal(false);
+      setShowSegmentation(true);
+      setPipelineStage("segmenting");
+      setStageMessage(
+        "Cancer detected. Running detailed segmentation analysis...",
+      );
+      setPollTick((prev) => prev + 1);
+
+      toast({
+        title: "Segmentation started",
+        description: "The segmentation job is now running.",
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to start segmentation.";
+      toast({
+        title: "Segmentation failed",
+        description: message,
+        variant: "destructive",
+      });
+      setPipelineStage("error");
+      setStageMessage("Unable to start segmentation.");
+    } finally {
+      setIsStartingSegmentation(false);
+    }
+  };
 
   const updateStageUI = (
     stage?: ApiAnalysisResponse["stage"],
@@ -129,6 +219,11 @@ const Analysis = () => {
       return undefined;
     }
   }, [routeJobId]);
+
+  useEffect(() => {
+    classificationModalShownRef.current = false;
+    setShowResultsModal(false);
+  }, [jobId]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -198,7 +293,9 @@ const Analysis = () => {
           setSegmentationError(null);
         }
 
-        if (nextSegmentImages.length === 0) {
+        if (nextSegmentImages.length > 0 || data.segmentation) {
+          setShowSegmentation(true);
+        } else {
           setShowSegmentation(false);
         }
       } catch (e) {
@@ -257,199 +354,250 @@ const Analysis = () => {
       : "No cancer indicators detected"
     : "Classification pending";
 
+  const resultsModalTitle = classification?.has_cancer
+    ? "Cancer indicators detected"
+    : "No Cancer indicators detected";
+
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b border-border bg-card/50 backdrop-blur-xl sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <Logo />
+    <>
+      {showResultsModal && classification && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl">
+            <p className="text-sm text-muted-foreground">
+              Classification result
+            </p>
+            <h2 className="mt-2 text-2xl font-semibold text-foreground">
+              {resultsModalTitle}
+            </h2>
 
-          <div className="flex items-center gap-4">
-            {patient && (
-              <div className="text-sm text-muted-foreground">
-                Patient:{" "}
-                <span className="text-foreground font-medium">
-                  {patient.name}
-                </span>
-                <span className="text-border mx-2">|</span>
-                ID:{" "}
-                <span className="text-foreground font-medium">
-                  {patient.id}
-                </span>
-              </div>
-            )}
-          </div>
-        </div>
-      </header>
+            <p className="mt-4 text-sm text-muted-foreground">
+              {classification.has_cancer
+                ? "This scan appears positive. You can return to the dashboard or continue with a manual segmentation review."
+                : "This scan does not show the cancer indicators from the classifier. You can review the result or return to the dashboard."}
+            </p>
 
-      <main className="max-w-7xl mx-auto px-6 py-8">
-        {/* Back Button & Title */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-4">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => navigate("/dashboard")}
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Back to Dashboard
-            </Button>
-
-            <div>
-              <h1 className="text-2xl font-semibold text-foreground">
-                CT Scan Analysis Results
-              </h1>
-              <p className="text-muted-foreground mt-1">
-                Analysis completed •{" "}
-                {new Date().toLocaleDateString("en-US", {
-                  year: "numeric",
-                  month: "long",
-                  day: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {(pipelineStage === "queued" ||
-              pipelineStage === "classifying" ||
-              pipelineStage === "segmenting") && (
-              <Button variant="outline" onClick={handleCancelPolling}>
-                Cancel Processing
+            <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <Button variant="outline" onClick={handleReturnToDashboard}>
+                Return to Dashboard
               </Button>
-            )}
-            <Button variant="glow" onClick={handleDownloadPDF}>
-              <Download className="w-4 h-4" />
-              Download Results as PDF
-            </Button>
-          </div>
-        </div>
 
-        <div className="mb-6 rounded-lg border border-border bg-card p-4">
-          <p className="text-sm text-muted-foreground">Pipeline Stage</p>
-          <p className="text-base font-medium text-foreground">
-            {stageMessage}
-          </p>
-          <p className="text-sm mt-1 text-muted-foreground">
-            {classificationText}
-          </p>
-          {errorMessage && (
-            <div className="mt-3">
-              <p className="text-sm text-destructive">{errorMessage}</p>
-              <div className="mt-2 flex gap-2">
-                <Button size="sm" onClick={handleRetryPolling}>
-                  Retry
-                </Button>
+              {classification.has_cancer ? (
                 <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => navigate("/dashboard")}
+                  onClick={handleProceedToSegmentation}
+                  disabled={isStartingSegmentation}
                 >
-                  Restart
+                  {isStartingSegmentation ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Starting...
+                    </>
+                  ) : (
+                    "Proceed to Segmentation"
+                  )}
                 </Button>
-              </div>
+              ) : (
+                <Button variant="secondary" onClick={handleSeeResult}>
+                  See Result
+                </Button>
+              )}
             </div>
-          )}
-          {segmentationError && (
-            <p className="text-sm text-warning mt-2">{segmentationError}</p>
-          )}
-        </div>
-
-        {/* Main Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* CT Scan Viewers */}
-          <div className="space-y-6">
-            {/* Toggle */}
-            <div className="flex items-center gap-4">
-              <Button
-                variant={!showSegmentation ? "default" : "outline"}
-                size="sm"
-                onClick={() => setShowSegmentation(false)}
-              >
-                <FileText className="w-4 h-4" />
-                Original Scan
-              </Button>
-              <Button
-                variant={showSegmentation ? "default" : "outline"}
-                size="sm"
-                onClick={() => setShowSegmentation(true)}
-                disabled={!hasSegmentation}
-              >
-                <Layers className="w-4 h-4" />
-                Segmentation View
-              </Button>
-            </div>
-
-            {/* CT Scan Viewer */}
-            <CTScanViewer
-              result={result ?? emptyAnalysisResult}
-              showSegmentation={showSegmentation}
-              segmentImages={segmentImages}
-            />
-
-            {!hasSegmentation && classification?.has_cancer === false && (
-              <div className="bg-card border border-border rounded-lg p-4 text-sm text-muted-foreground">
-                Segmentation was skipped because classification was negative.
-              </div>
-            )}
           </div>
+        </div>
+      )}
 
-          {/* Analysis Results */}
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-lg font-semibold text-foreground mb-4">
-                Analysis Metrics
-              </h2>
-              {classification && (
-                <div className="mb-4 rounded-lg border border-border bg-card p-4">
-                  <h3 className="text-sm font-semibold text-foreground mb-2">
-                    Classification Result
-                  </h3>
-                  <p className="text-2xl font-bold text-foreground leading-tight">
-                    {classification.has_cancer
-                      ? "High risk cancer detected"
-                      : "Low risk detected"}
-                  </p>
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    {classification.has_cancer
-                      ? "Suggest review in 1–2 weeks."
-                      : "Continue routine follow-up and recheck if needed."}
-                  </p>
+      <div className="min-h-screen bg-background">
+        {/* Header */}
+        <header className="border-b border-border bg-card/50 backdrop-blur-xl sticky top-0 z-50">
+          <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+            <Logo />
+
+            <div className="flex items-center gap-4">
+              {patient && (
+                <div className="text-sm text-muted-foreground">
+                  Patient:{" "}
+                  <span className="text-foreground font-medium">
+                    {patient.name}
+                  </span>
+                  <span className="text-border mx-2">|</span>
+                  ID:{" "}
+                  <span className="text-foreground font-medium">
+                    {patient.id}
+                  </span>
                 </div>
               )}
-              <MalignancyChart result={result ?? emptyAnalysisResult} />
-              <div className="bg-card border border-border rounded-lg p-4">
-                <h3 className="text-sm font-medium text-foreground mb-3">
-                  Coordinate Legend
-                </h3>
-                <div className="space-y-2">
-                  {(result?.coordinates ?? []).map((coord, index) => (
-                    <div
-                      key={index}
-                      className="flex items-center justify-between text-sm"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 bg-destructive text-destructive-foreground text-xs rounded">
-                          {coord.label}
-                        </span>
-                        <span className="text-muted-foreground">
-                          Nodule {index + 1}
+            </div>
+          </div>
+        </header>
+
+        <main className="max-w-7xl mx-auto px-6 py-8">
+          {/* Back Button & Title */}
+          <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center gap-4">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate("/dashboard")}
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Back to Dashboard
+              </Button>
+
+              <div>
+                <h1 className="text-2xl font-semibold text-foreground">
+                  CT Scan Analysis Results
+                </h1>
+                <p className="text-muted-foreground mt-1">
+                  Analysis completed •{" "}
+                  {new Date().toLocaleDateString("en-US", {
+                    year: "numeric",
+                    month: "long",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {(pipelineStage === "queued" ||
+                pipelineStage === "classifying" ||
+                pipelineStage === "segmenting") && (
+                <Button variant="outline" onClick={handleCancelPolling}>
+                  Cancel Processing
+                </Button>
+              )}
+              <Button variant="glow" onClick={handleDownloadPDF}>
+                <Download className="w-4 h-4" />
+                Download Results as PDF
+              </Button>
+            </div>
+          </div>
+
+          <div className="mb-6 rounded-lg border border-border bg-card p-4">
+            <p className="text-sm text-muted-foreground">Pipeline Stage</p>
+            <p className="text-base font-medium text-foreground">
+              {stageMessage}
+            </p>
+            <p className="text-sm mt-1 text-muted-foreground">
+              {classificationText}
+            </p>
+            {errorMessage && (
+              <div className="mt-3">
+                <p className="text-sm text-destructive">{errorMessage}</p>
+                <div className="mt-2 flex gap-2">
+                  <Button size="sm" onClick={handleRetryPolling}>
+                    Retry
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => navigate("/dashboard")}
+                  >
+                    Restart
+                  </Button>
+                </div>
+              </div>
+            )}
+            {segmentationError && (
+              <p className="text-sm text-warning mt-2">{segmentationError}</p>
+            )}
+          </div>
+
+          {/* Main Content */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            {/* CT Scan Viewers */}
+            <div className="space-y-6">
+              {/* Toggle */}
+              <div className="flex items-center gap-4">
+                <Button
+                  variant={!showSegmentation ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setShowSegmentation(false)}
+                >
+                  <FileText className="w-4 h-4" />
+                  Original Scan
+                </Button>
+                <Button
+                  variant={showSegmentation ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setShowSegmentation(true)}
+                  disabled={!hasSegmentation}
+                >
+                  <Layers className="w-4 h-4" />
+                  Segmentation View
+                </Button>
+              </div>
+
+              {/* CT Scan Viewer */}
+              <CTScanViewer
+                result={result ?? emptyAnalysisResult}
+                showSegmentation={showSegmentation}
+                segmentImages={segmentImages}
+              />
+
+              {!hasSegmentation && classification?.has_cancer === false && (
+                <div className="bg-card border border-border rounded-lg p-4 text-sm text-muted-foreground">
+                  Segmentation was skipped because classification was negative.
+                </div>
+              )}
+            </div>
+
+            {/* Analysis Results */}
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground mb-4">
+                  Analysis Metrics
+                </h2>
+                {classification && (
+                  <div className="mb-4 rounded-lg border border-border bg-card p-4">
+                    <h3 className="text-sm font-semibold text-foreground mb-2">
+                      Classification Result
+                    </h3>
+                    <p className="text-2xl font-bold text-foreground leading-tight">
+                      {classification.has_cancer
+                        ? "High risk cancer detected"
+                        : "Low risk detected"}
+                    </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      {classification.has_cancer
+                        ? "Suggest review in 1–2 weeks."
+                        : "Continue routine follow-up and recheck if needed."}
+                    </p>
+                  </div>
+                )}
+                <MalignancyChart result={result ?? emptyAnalysisResult} />
+                <div className="bg-card border border-border rounded-lg p-4">
+                  <h3 className="text-sm font-medium text-foreground mb-3">
+                    Coordinate Legend
+                  </h3>
+                  <div className="space-y-2">
+                    {(result?.coordinates ?? []).map((coord, index) => (
+                      <div
+                        key={index}
+                        className="flex items-center justify-between text-sm"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 bg-destructive text-destructive-foreground text-xs rounded">
+                            {coord.label}
+                          </span>
+                          <span className="text-muted-foreground">
+                            Nodule {index + 1}
+                          </span>
+                        </div>
+                        <span className="text-foreground font-mono">
+                          ({coord.x}%, {coord.y}%)
                         </span>
                       </div>
-                      <span className="text-foreground font-mono">
-                        ({coord.x}%, {coord.y}%)
-                      </span>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-        </div>
-      </main>
-    </div>
+        </main>
+      </div>
+    </>
   );
 };
 
