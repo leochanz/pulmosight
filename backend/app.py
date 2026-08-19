@@ -315,6 +315,14 @@ async def analysis_detail_api(job_id: str):
             except Exception:
                 meta = {}
 
+    classification_payload = result_data.get("classification")
+    if item is not None and classification_payload is None:
+        if item.get("is_cancer") is not None or item.get("confidence") is not None:
+            classification_payload = {
+                "has_cancer": bool(item.get("is_cancer")),
+                "confidence": float(item.get("confidence") or 0),
+            }
+
     if item is None:
         return {
             "jobId": job_id,
@@ -324,7 +332,7 @@ async def analysis_detail_api(job_id: str):
             "gender": meta.get("gender"),
             "scanDate": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
             "imagePath": str(next(iter(sorted(job_dir.glob("*.dcm"))), "")) or None if job_dir.exists() and any(job_dir.glob("*.dcm")) else None,
-            "classification": result_data.get("classification") or {"has_cancer": False, "confidence": 0},
+            "classification": classification_payload,
             "segmentation": result_data.get("segmentation"),
             "malignancyScore": result_data.get("malignancyScore"),
             "confidence": result_data.get("confidence"),
@@ -345,10 +353,7 @@ async def analysis_detail_api(job_id: str):
         "gender": item.get("gender") if item.get("gender") is not None else meta.get("gender"),
         "scanDate": item.get("scan_date") or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
         "imagePath": item.get("image_path"),
-        "classification": result_data.get("classification") or {
-            "has_cancer": bool(item.get("is_cancer")),
-            "confidence": float(item.get("confidence") or 0),
-        },
+        "classification": classification_payload,
         "segmentation": result_data.get("segmentation"),
         "malignancyScore": result_data.get("malignancyScore", item.get("malignancy_score")),
         "confidence": result_data.get("confidence", item.get("confidence")),

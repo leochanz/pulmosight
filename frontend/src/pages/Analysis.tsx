@@ -256,12 +256,17 @@ const Analysis = () => {
 
         if (cancelled) return;
 
-        if (data.classification) {
+        if (
+          data.classification &&
+          typeof data.classification.has_cancer === "boolean"
+        ) {
           setClassification({
             has_cancer: Boolean(data.classification.has_cancer),
             confidence: Number(data.classification.confidence ?? 0),
             label: data.classification.label,
           });
+        } else {
+          setClassification(null);
         }
 
         const mappedResult: AnalysisResult = {
@@ -324,7 +329,10 @@ const Analysis = () => {
 
         updateStageUI(data.stage, data.status);
 
-        if (data.classification) {
+        if (
+          data.classification &&
+          typeof data.classification.has_cancer === "boolean"
+        ) {
           const nextClassification = {
             has_cancer: Boolean(data.classification.has_cancer),
             confidence: Number(data.classification.confidence ?? 0),
@@ -334,6 +342,8 @@ const Analysis = () => {
           if (data.stage === "classification") {
             allowClassificationModalRef.current = true;
           }
+        } else {
+          setClassification(null);
         }
 
         if (data.status === "failed") {
@@ -434,7 +444,7 @@ const Analysis = () => {
     ? classification.has_cancer
       ? "High risk cancer detected"
       : "Low risk detected"
-    : "Classification pending — results are not out yet";
+    : "Classification pending";
 
   const classificationDetailText = classification
     ? classification.has_cancer
