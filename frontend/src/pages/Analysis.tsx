@@ -1,4 +1,4 @@
-import { useNavigate, useLocation } from "react-router-dom";
+import { useNavigate, useLocation, useParams } from "react-router-dom";
 import { Logo } from "@/components/Logo";
 import { CTScanViewer } from "@/components/CTScanViewer";
 import { MalignancyChart } from "@/components/MalignancyChart";
@@ -66,8 +66,10 @@ type ApiAnalysisResponse = {
 const Analysis = () => {
   const navigate = useNavigate();
   const location = useLocation();
+  const { jobId: routeParamJobId } = useParams<{ jobId: string }>();
   const patient = location.state?.patient as Patient | undefined;
   const routeJobId = location.state?.jobId as string | undefined;
+  const cameFromHistory = location.state?.fromHistory === true;
   const [showSegmentation, setShowSegmentation] = useState(false);
   const [showResultsModal, setShowResultsModal] = useState(false);
   const [isStartingSegmentation, setIsStartingSegmentation] = useState(false);
@@ -88,27 +90,37 @@ const Analysis = () => {
   const [pollingCancelled, setPollingCancelled] = useState(false);
   const activeController = useRef<AbortController | null>(null);
   const classificationModalShownRef = useRef(false);
+  const allowClassificationModalRef = useRef(false);
 
   const hasSegmentation = segmentImages.length > 0;
 
-  // IMPORTANT: The classification result opens the modal only once per job.
-  // Polling can re-read the same result payload, so we must not reopen the modal
-  // just because the fetch completes again or the final result arrives.
+  // The modal should only appear when the active classification pipeline reports
+  // its first result. Historical or persisted fetches are not considered a new
+  // classification result, so they are excluded from this trigger.
   useEffect(() => {
-    if (!classification || classificationModalShownRef.current) return;
+    if (
+      !classification ||
+      classificationModalShownRef.current ||
+      !allowClassificationModalRef.current
+    ) {
+      return;
+    }
 
     classificationModalShownRef.current = true;
+    allowClassificationModalRef.current = false;
     setShowResultsModal(true);
   }, [classification]);
 
   const handleReturnToDashboard = () => {
     classificationModalShownRef.current = true;
+    allowClassificationModalRef.current = false;
     setShowResultsModal(false);
-    navigate("/dashboard");
+    navigate(cameFromHistory ? "/history" : "/dashboard");
   };
 
   const handleSeeResult = () => {
     classificationModalShownRef.current = true;
+    allowClassificationModalRef.current = false;
     setShowResultsModal(false);
   };
 
@@ -149,6 +161,7 @@ const Analysis = () => {
       // Close the modal and move the user into the segmentation stage only after
       // the explicit user action. This keeps the backend trigger gated.
       classificationModalShownRef.current = true;
+      allowClassificationModalRef.current = false;
       setShowResultsModal(false);
       setShowSegmentation(true);
       setPipelineStage("segmenting");
@@ -209,6 +222,7 @@ const Analysis = () => {
   };
 
   const jobId = useMemo(() => {
+    if (routeParamJobId) return routeParamJobId;
     if (routeJobId) return routeJobId;
     const raw = sessionStorage.getItem("analysisContext");
     if (!raw) return undefined;
@@ -218,20 +232,78 @@ const Analysis = () => {
     } catch {
       return undefined;
     }
-  }, [routeJobId]);
+  }, [routeParamJobId, routeJobId]);
 
   useEffect(() => {
     classificationModalShownRef.current = false;
+    allowClassificationModalRef.current = false;
     setShowResultsModal(false);
   }, [jobId]);
 
   useEffect(() => {
     if (!jobId) return;
-    if (pollingCancelled) return;
 
     let cancelled = false;
-    let timer: number | null = null;
 
+    const loadFromPersistentApi = async () => {
+      try {
+        const res = await fetch(
+          `${import.meta.env.VITE_API_BASE_URL}/api/analysis/${jobId}`,
+        );
+        if (!res.ok)
+          throw new Error(`Failed to fetch persisted analysis (${res.status})`);
+        const data: ApiAnalysisResponse = await res.json();
+
+        if (cancelled) return;
+
+        if (data.classification) {
+          setClassification({
+            has_cancer: Boolean(data.classification.has_cancer),
+            confidence: Number(data.classification.confidence ?? 0),
+            label: data.classification.label,
+          });
+        }
+
+        const mappedResult: AnalysisResult = {
+          malignancyScore: data.malignancyScore ?? 0,
+          confidence: data.confidence ?? 0,
+          noduleCount: data.noduleCount ?? 0,
+          coordinates: data.coordinates ?? [],
+          segmentationData: "",
+          originalScan: data.originalScan ?? "",
+          findings: data.findings ?? [],
+        };
+
+        setResult(mappedResult);
+        setSegmentImages(data.segmentationImages ?? []);
+        setShowSegmentation(
+          (data.segmentationImages ?? []).length > 0 || !!data.segmentation,
+        );
+        updateStageUI(data.stage, data.status);
+
+        if (data.segmentation?.failed) {
+          setSegmentationError(
+            data.segmentation.error ||
+              "Segmentation failed after positive classification.",
+          );
+        } else {
+          setSegmentationError(null);
+        }
+      } catch (error) {
+        console.error("[Analysis] load from DB failed:", error);
+        setErrorMessage(
+          error instanceof Error
+            ? error.message
+            : "Unable to load analysis details.",
+        );
+      }
+    };
+
+    loadFromPersistentApi();
+
+    if (pollingCancelled) return;
+
+    let timer: number | null = null;
     const fetchResult = async () => {
       activeController.current?.abort();
       const controller = new AbortController();
@@ -253,11 +325,15 @@ const Analysis = () => {
         updateStageUI(data.stage, data.status);
 
         if (data.classification) {
-          setClassification({
+          const nextClassification = {
             has_cancer: Boolean(data.classification.has_cancer),
             confidence: Number(data.classification.confidence ?? 0),
             label: data.classification.label,
-          });
+          };
+          setClassification(nextClassification);
+          if (data.stage === "classification") {
+            allowClassificationModalRef.current = true;
+          }
         }
 
         if (data.status === "failed") {
@@ -354,6 +430,18 @@ const Analysis = () => {
       : "No cancer indicators detected"
     : "Classification pending";
 
+  const classificationSummaryText = classification
+    ? classification.has_cancer
+      ? "High risk cancer detected"
+      : "Low risk detected"
+    : "Classification pending — results are not out yet";
+
+  const classificationDetailText = classification
+    ? classification.has_cancer
+      ? "Suggest review in 1–2 weeks."
+      : "Continue routine follow-up and recheck if needed."
+    : "Waiting for the classification model to finish evaluating this scan.";
+
   const resultsModalTitle = classification?.has_cancer
     ? "Cancer indicators detected"
     : "No Cancer indicators detected";
@@ -378,7 +466,7 @@ const Analysis = () => {
 
             <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
               <Button variant="outline" onClick={handleReturnToDashboard}>
-                Return to Dashboard
+                {cameFromHistory ? "Return to History" : "Return to Dashboard"}
               </Button>
 
               {classification.has_cancer ? (
@@ -436,10 +524,12 @@ const Analysis = () => {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => navigate("/dashboard")}
+                onClick={() =>
+                  navigate(cameFromHistory ? "/history" : "/dashboard")
+                }
               >
                 <ArrowLeft className="w-4 h-4" />
-                Back to Dashboard
+                {cameFromHistory ? "Back to History" : "Back to Dashboard"}
               </Button>
 
               <div>
@@ -549,23 +639,17 @@ const Analysis = () => {
                 <h2 className="text-lg font-semibold text-foreground mb-4">
                   Analysis Metrics
                 </h2>
-                {classification && (
-                  <div className="mb-4 rounded-lg border border-border bg-card p-4">
-                    <h3 className="text-sm font-semibold text-foreground mb-2">
-                      Classification Result
-                    </h3>
-                    <p className="text-2xl font-bold text-foreground leading-tight">
-                      {classification.has_cancer
-                        ? "High risk cancer detected"
-                        : "Low risk detected"}
-                    </p>
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      {classification.has_cancer
-                        ? "Suggest review in 1–2 weeks."
-                        : "Continue routine follow-up and recheck if needed."}
-                    </p>
-                  </div>
-                )}
+                <div className="mb-4 rounded-lg border border-border bg-card p-4">
+                  <h3 className="text-sm font-semibold text-foreground mb-2">
+                    Classification Result
+                  </h3>
+                  <p className="text-2xl font-bold text-foreground leading-tight">
+                    {classificationSummaryText}
+                  </p>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {classificationDetailText}
+                  </p>
+                </div>
                 <MalignancyChart result={result ?? emptyAnalysisResult} />
                 <div className="bg-card border border-border rounded-lg p-4">
                   <h3 className="text-sm font-medium text-foreground mb-3">

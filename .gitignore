@@ -33,3 +33,5 @@ best_model_fold5.pth
 medsam_seg_fold2_last.pt
 
 .venv/
+
+app.db
